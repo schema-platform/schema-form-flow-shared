@@ -1,0 +1,40 @@
+{
+  "name": "@schema-form/flow-shared",
+  "version": "1.0.0",
+  "private": false,
+  "type": "module",
+  "author": "yangdongnan",
+  "description": "流程引擎共享层 — BPMN 类型定义、图数据结构、执行模型、表达式求值",
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./types": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/types/index.js"
+    },
+    "./engine": {
+      "types": "./dist/engine/index.d.ts",
+      "import": "./dist/engine/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "jsdom": "^26.1.0",
+    "typescript": "~5.7.3",
+    "vitest": "^3.2.4"
+  }
+}
