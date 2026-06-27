@@ -1,10 +1,11 @@
 {
-  "name": "@schema-form/flow-shared",
-  "version": "1.0.0",
+  "name": "@schema-platform/flow-shared",
+  "version": "1.0.1",
   "private": false,
   "type": "module",
   "author": "yangdongnan",
   "description": "流程引擎共享层 — BPMN 类型定义、图数据结构、执行模型、表达式求值",
+  "repository": "github:schema-platform/schema-form-flow-shared",
   "publishConfig": {
     "registry": "https://npm.pkg.github.com"
   },

@@ -129,6 +129,15 @@ export function validateFlow(graph: FlowGraph): ValidationError[] {
         })
       }
     }
+    if (node.data.bpmnType === BpmnElementType.CallActivity) {
+      if (!node.data.callActivityDefinitionId) {
+        errors.push({
+          nodeId: node.id,
+          level: 'error',
+          message: `调用活动「${node.data.label}」未关联流程定义`,
+        })
+      }
+    }
   }
 
   return errors

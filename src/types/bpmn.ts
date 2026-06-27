@@ -104,4 +104,28 @@ export interface BpmnNodeConfig {
   multiInstance?: MultiInstanceConfig
   /** Timeout in minutes for ParallelGateway join waiting tokens */
   joinTimeout?: number
+  /** 容器操作栏允许的操作按钮 */
+  allowedActions?: string[]
+  /** 审批人高级规则 */
+  approverRules?: {
+    excludeInitiator?: boolean
+    deduplicate?: boolean
+    autoSkipIfEmpty?: boolean
+  }
+  /** 字段可见性条件（变量联动） */
+  fieldConditions?: Array<{
+    field: string
+    condition: string
+    action: 'show' | 'hide' | 'readonly'
+  }>
+  /** 子流程超时时间（分钟） */
+  subProcessTimeout?: number
+  /** 超时处理动作 */
+  timeoutAction?: 'auto-approve' | 'auto-transfer' | 'notify'
+  /** 子流程错误处理 */
+  errorHandling?: {
+    onError: 'fail' | 'retry' | 'skip'
+    retryCount?: number
+    retryDelay?: number
+  }
 }

@@ -31,14 +31,43 @@ export interface StartFlowInstanceDto {
 export interface CompleteTaskDto {
   formData?: Record<string, unknown>
   outcome?: string
+  comment?: string
 }
 
 export interface DelegateTaskDto {
   targetUserId: string
+  comment?: string
 }
 
 export interface RejectToNodeDto {
   targetNodeId: string
+  comment?: string
+}
+
+export interface AddCommentDto {
+  comment: string
+}
+
+export interface UrgeTaskDto {
+  message?: string
+}
+
+export interface WithdrawInstanceDto {
+  comment?: string
+}
+
+export interface TransferTaskDto {
+  targetUserId: string
+  comment?: string
+}
+
+export interface AddApproverDto {
+  userIds: string[]
+  comment?: string
+}
+
+export interface RemoveApproverDto {
+  userIds: string[]
   comment?: string
 }
 

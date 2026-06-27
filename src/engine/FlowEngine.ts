@@ -86,7 +86,21 @@ export interface FlowEngineAPI {
     definitionId: string,
     variables: Record<string, unknown>,
     context: ExecutionContext,
+    parentInfo?: { instanceId: string; nodeId: string; inputMapping?: Record<string, unknown>; outputMapping?: Record<string, unknown> },
   ): Promise<FlowInstanceData>
+  /** 子流程完成后恢复父流程 */
+  resumeFromSubProcess(
+    parentInstanceId: string,
+    parentNodeId: string,
+    childInstanceId: string,
+    outputMapping?: Record<string, unknown>,
+  ): Promise<void>
+  /** 检查指定节点是否已完成（用于网关合并） */
+  isNodeCompleted(nodeId: string): boolean
+  /** 标记节点已完成 */
+  markNodeCompleted(nodeId: string): void
+  /** 获取节点的入边 */
+  getIncomingEdges(nodeId: string): ParsedEdge[]
 }
 
 // ────────────────────────────────────────────
@@ -133,6 +147,8 @@ export interface FlowEngineCallbacks {
   onTaskCreated?: (task: TaskInstanceData) => void
   /** 流程完成 */
   onFlowComplete?: (instance: FlowInstanceData) => void
+  /** 子流程完成 — 用于恢复父流程 */
+  onSubProcessComplete?: (childInstance: FlowInstanceData, parentInstanceId: string, parentNodeId: string, outputMapping?: Record<string, unknown>) => Promise<void>
   /** 流程异常 */
   onFlowError?: (instanceId: string, error: string) => void
   /** 需要 AI 介入（如智能指派） */
@@ -156,6 +172,8 @@ export class FlowEngine implements FlowEngineAPI {
   private persistence: FlowPersistence
   private callbacks: FlowEngineCallbacks
   private executors = new Map<BpmnElementType, NodeExecutor>()
+  private completedNodes = new Set<string>()
+  private currentModel: ExecutableModel | null = null
 
   constructor(config: FlowEngineConfig) {
     this.persistence = config.persistence
@@ -171,6 +189,7 @@ export class FlowEngine implements FlowEngineAPI {
     this.registerExecutor(new ScriptTaskExecutor())
     this.registerExecutor(new TimerEventExecutor())
     this.registerExecutor(new SubProcessExecutor())
+    this.registerExecutor(new CallActivityExecutor())
   }
 
   // ────── 公共 API ──────
@@ -198,6 +217,7 @@ export class FlowEngine implements FlowEngineAPI {
 
     // 2. 解析为可执行模型
     const model = parseBpmnGraph(graph)
+    this.currentModel = model
 
     // 3. 校验
     const errors = validateFlow(graph)
@@ -599,12 +619,119 @@ export class FlowEngine implements FlowEngineAPI {
     this.persistence.createLog(entry)
   }
 
+  isNodeCompleted(nodeId: string): boolean {
+    return this.completedNodes.has(nodeId)
+  }
+
+  markNodeCompleted(nodeId: string): void {
+    this.completedNodes.add(nodeId)
+  }
+
+  getIncomingEdges(nodeId: string): ParsedEdge[] {
+    return this.currentModel?.getIncoming(nodeId) ?? []
+  }
+
   async startSubProcess(
     definitionId: string,
     variables: Record<string, unknown>,
     context: ExecutionContext,
+    parentInfo?: { instanceId: string; nodeId: string; inputMapping?: Record<string, unknown>; outputMapping?: Record<string, unknown> },
   ): Promise<FlowInstanceData> {
-    return this.startInstance(definitionId, variables, context.operator ?? 'system')
+    // Apply inputMapping: transform parent variables to subprocess variables
+    let subprocessVariables = { ...variables }
+    if (parentInfo?.inputMapping) {
+      const mapped: Record<string, unknown> = {}
+      for (const [subKey, parentExpr] of Object.entries(parentInfo.inputMapping)) {
+        if (typeof parentExpr === 'string' && parentExpr.startsWith('${') && parentExpr.endsWith('}')) {
+          // Expression: ${variableName} → look up in parent variables
+          const varName = parentExpr.slice(2, -1)
+          mapped[subKey] = variables[varName]
+        } else {
+          // Direct value
+          mapped[subKey] = parentExpr
+        }
+      }
+      subprocessVariables = mapped
+    }
+
+    // Start subprocess instance with parentInstanceId link
+    const instance = await this.startInstance(definitionId, subprocessVariables, context.operator ?? 'system')
+
+    // Link parent-child
+    if (parentInfo) {
+      await this.persistence.updateInstance(instance.id, {
+        parentInstanceId: parentInfo.instanceId,
+      })
+
+      // Add childInstanceId to parent
+      const parentInstance = await this.persistence.getInstance(parentInfo.instanceId)
+      if (parentInstance) {
+        const childIds = [...(parentInstance.childInstanceIds ?? []), instance.id]
+        await this.persistence.updateInstance(parentInfo.instanceId, {
+          childInstanceIds: childIds,
+        })
+      }
+    }
+
+    return instance
+  }
+
+  async resumeFromSubProcess(
+    parentInstanceId: string,
+    parentNodeId: string,
+    childInstanceId: string,
+    outputMapping?: Record<string, unknown>,
+  ): Promise<void> {
+    // Get parent instance
+    const parentInstance = await this.persistence.getInstance(parentInstanceId)
+    if (!parentInstance) {
+      throw new FlowEngineError('INSTANCE_NOT_FOUND', `父实例 ${parentInstanceId} 不存在`)
+    }
+
+    // Get child instance to extract its variables
+    const childInstance = await this.persistence.getInstance(childInstanceId)
+    if (!childInstance) {
+      throw new FlowEngineError('INSTANCE_NOT_FOUND', `子实例 ${childInstanceId} 不存在`)
+    }
+
+    // Apply outputMapping: extract child variables to parent
+    if (outputMapping) {
+      for (const [parentKey, childExpr] of Object.entries(outputMapping)) {
+        if (typeof childExpr === 'string' && childExpr.startsWith('${') && childExpr.endsWith('}')) {
+          const varName = childExpr.slice(2, -1)
+          parentInstance.variables[parentKey] = childInstance.variables[varName]
+        } else {
+          parentInstance.variables[parentKey] = childExpr
+        }
+      }
+    }
+
+    // Update parent variables
+    await this.persistence.updateInstance(parentInstanceId, {
+      variables: parentInstance.variables,
+    })
+
+    // Resume parent execution from the subprocess node's outgoing edges
+    const graph = await this.persistence.getDefinition(parentInstance.definitionId)
+    if (!graph) {
+      throw new FlowEngineError('DEFINITION_NOT_FOUND', `流程定义 ${parentInstance.definitionId} 不存在`)
+    }
+
+    const model = parseBpmnGraph(graph)
+    const context: ExecutionContext = {
+      instanceId: parentInstance.id,
+      variables: { ...parentInstance.variables },
+      nodeFormData: await this.collectNodeFormData(parentInstance.id),
+      operator: 'system',
+      initiator: parentInstance.initiatedBy,
+    }
+
+    const nextEdges = model.getOutgoing(parentNodeId)
+    const nextNodeIds = nextEdges.map(e => e.targetNodeId)
+
+    for (const nextNodeId of nextNodeIds) {
+      await this.executeNode(model, nextNodeId, context)
+    }
   }
 
   // ────── 内部方法 ──────
@@ -645,6 +772,8 @@ export class FlowEngine implements FlowEngineAPI {
     // 处理结果
     switch (result.action) {
       case 'continue':
+        // 标记当前节点已完成
+        this.completedNodes.add(nodeId)
         // 继续执行下一节点
         for (const nextNodeId of result.nextNodeIds) {
           await this.executeNode(model, nextNodeId, context)
@@ -659,17 +788,50 @@ export class FlowEngine implements FlowEngineAPI {
         }
         break
 
-      case 'complete':
+      case 'complete': {
         // 流程完成
         await this.persistence.updateInstance(context.instanceId, {
           status: 'completed',
           completedAt: new Date(),
         })
-        const instance = await this.persistence.getInstance(context.instanceId)
-        if (instance) {
-          this.callbacks.onFlowComplete?.(instance)
+        const completedInstance = await this.persistence.getInstance(context.instanceId)
+        if (completedInstance) {
+          this.callbacks.onFlowComplete?.(completedInstance)
+
+          // If this is a subprocess, trigger parent resumption
+          if (completedInstance.parentInstanceId) {
+            const parentInstance = await this.persistence.getInstance(completedInstance.parentInstanceId)
+            if (parentInstance && parentInstance.status === 'running') {
+              // Find the subprocess node in parent that references this child
+              const parentGraph = await this.persistence.getDefinition(parentInstance.definitionId)
+              if (parentGraph) {
+                const parentModel = parseBpmnGraph(parentGraph)
+                // Find the node whose subprocess started this child instance
+                const childIdx = (parentInstance.childInstanceIds ?? []).indexOf(completedInstance.id)
+                if (childIdx >= 0) {
+                  // Find the subprocess/call-activity node by matching definitionId
+                  for (const node of parentModel.getAllNodes()) {
+                    const nodeConfig = node.config
+                    const defId = nodeConfig.subProcessDefinitionId || nodeConfig.callActivityDefinitionId
+                    if (defId === completedInstance.definitionId) {
+                      // Resume parent from this node
+                      const outputMapping = nodeConfig.outputMapping as Record<string, unknown> | undefined
+                      await this.resumeFromSubProcess(
+                        completedInstance.parentInstanceId,
+                        node.id,
+                        completedInstance.id,
+                        outputMapping,
+                      )
+                      break
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
         break
+      }
 
       case 'error':
         // 流程异常
@@ -819,8 +981,18 @@ class ParallelGatewayExecutor implements NodeExecutor {
     }
 
     // converging: 等待所有入边令牌到达
-    // TODO: 实现令牌合并逻辑
-    return { action: 'continue', nextNodeIds: edges.map(e => e.targetNodeId) }
+    // Check if all incoming edges' source nodes have completed
+    const incomingEdges = engine.getIncomingEdges(node.id)
+    const allCompleted = incomingEdges.length > 0 && incomingEdges.every(e => engine.isNodeCompleted(e.sourceNodeId))
+
+    if (!allCompleted) {
+      // Not all branches arrived yet — wait
+      return { action: 'wait' }
+    }
+
+    // All branches arrived — merge and continue
+    const nextNodeIds = edges.map(e => e.targetNodeId)
+    return { action: 'continue', nextNodeIds }
   }
 }
 
@@ -897,10 +1069,45 @@ class SubProcessExecutor implements NodeExecutor {
         config.subProcessDefinitionId,
         context.variables,
         context,
+        {
+          instanceId: context.instanceId,
+          nodeId: node.id,
+          inputMapping: config.inputMapping as Record<string, unknown> | undefined,
+          outputMapping: config.outputMapping as Record<string, unknown> | undefined,
+        },
       )
     }
 
-    const nextNodeIds = edges.map(e => e.targetNodeId)
-    return { action: 'continue', nextNodeIds }
+    // Wait for subprocess to complete — resumeFromSubProcess will be called when it finishes
+    return { action: 'wait' }
+  }
+}
+
+class CallActivityExecutor implements NodeExecutor {
+  bpmnType = BpmnElementType.CallActivity
+
+  async execute(
+    node: ParsedNode,
+    edges: ParsedEdge[],
+    context: ExecutionContext,
+    engine: FlowEngineAPI,
+  ): Promise<NodeExecutionResult> {
+    const config = node.config
+    if (config.callActivityDefinitionId) {
+      await engine.startSubProcess(
+        config.callActivityDefinitionId,
+        context.variables,
+        context,
+        {
+          instanceId: context.instanceId,
+          nodeId: node.id,
+          inputMapping: config.inputMapping as Record<string, unknown> | undefined,
+          outputMapping: config.outputMapping as Record<string, unknown> | undefined,
+        },
+      )
+    }
+
+    // Wait for called process to complete
+    return { action: 'wait' }
   }
 }

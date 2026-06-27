@@ -25,6 +25,10 @@ export interface FlowInstanceData {
   completedAt?: Date
   createdAt: Date
   updatedAt: Date
+  /** 父流程实例 ID（子流程场景） */
+  parentInstanceId?: string
+  /** 子流程实例 ID 列表 */
+  childInstanceIds?: string[]
 }
 
 export interface TaskInstanceData {
